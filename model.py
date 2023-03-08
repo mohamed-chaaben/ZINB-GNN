@@ -1,448 +1,312 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
+from torch.autograd import Variable
+from torch.nn.parameter import Parameter
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
-# Define the NB class first, not mixture version
-class NBNorm(nn.Module):
-    def __init__(self, c_in, c_out):
-        super(NBNorm, self).__init__()
-        self.c_in = c_in
-        self.c_out = c_out
-        self.n_conv = nn.Conv2d(in_channels=c_in,
-                                out_channels=c_out,
-                                kernel_size=(1, 1),
-                                bias=True)
+class GDCN(nn.Module):
+    def __init__(self, in_dim=1, blocks=2, layers=2, residual_channels=1, dilation_channels=1, kernel_size=2):
+        super(GDCN, self).__init__()
+        self.blocks = blocks
+        self.layers = layers
+        self.filter_convs = nn.ModuleList()
+        self.gate_convs = nn.ModuleList()
+        self.start_conv = nn.Conv2d(in_channels=in_dim, out_channels=residual_channels, kernel_size=(1, 1),
+                                    padding='same')
 
-        self.p_conv = nn.Conv2d(in_channels=c_in,
-                                out_channels=c_out,
-                                kernel_size=(1, 1),
-                                bias=True)
-        self.out_dim = c_out  # output horizon
+        for b in range(blocks):
+            new_dilation = 1
+            for i in range(layers):
+                # dialated convolutions
+                self.filter_convs.append(nn.Conv2d(in_channels=residual_channels, out_channels=dilation_channels,
+                                                   kernel_size=(1, kernel_size), dilation=new_dilation, padding='same'))
+                self.gate_convs.append(nn.Conv2d(in_channels=residual_channels, out_channels=dilation_channels,
+                                                 kernel_size=(1, kernel_size), dilation=new_dilation, padding='same'))
 
-    def forward(self, x):
-        x = x.permute(0, 2, 1, 3)
-        (B, _, N, _) = x.shape  # B: batch_size; N: input nodes
-        n = self.n_conv(x).squeeze_(-1)
-        p = self.p_conv(x).squeeze_(-1)
-
-        # Reshape
-        n = n.view([B, self.out_dim, N])
-        p = p.view([B, self.out_dim, N])
-
-        # Ensure n is positive and p between 0 and 1
-        n = F.softplus(n)  # Some parameters can be tuned here
-        p = F.sigmoid(p)
-        return n.permute([0, 2, 1]), p.permute([0, 2, 1])
-
-    @staticmethod
-    def likelihood_loss(y, n, p, y_mask=None):
-        """
-        y: true values
-        y_mask: whether missing mask is given
-        """
-        nll = torch.lgamma(n) + torch.lgamma(y + 1) - torch.lgamma(n + y) - n * torch.log(p) - y * torch.log(1 - p)
-        if y_mask is not None:
-            nll = nll * y_mask
-        return torch.sum(nll)
-
-    def mean(self, n, p):
-        """
-        :param cat: Input data of shape (batch_size, num_timesteps, in_nodes)
-        :return: Output data of shape (batch_size, 1, num_timesteps, in_nodes)
-        """
-        pass
-
-
-# Define the Gaussian
-class GaussNorm(nn.Module):
-    def __init__(self, c_in, c_out):
-        super(GaussNorm, self).__init__()
-        self.c_in = c_in
-        self.c_out = c_out
-        self.n_conv = nn.Conv2d(in_channels=c_in,
-                                out_channels=c_out,
-                                kernel_size=(1, 1),
-                                bias=True)
-
-        self.p_conv = nn.Conv2d(in_channels=c_in,
-                                out_channels=c_out,
-                                kernel_size=(1, 1),
-                                bias=True)
-        self.out_dim = c_out  # output horizon
-
-    def forward(self, x):
-        x = x.permute(0, 2, 1, 3)
-        (B, _, N, _) = x.shape  # B: batch_size; N: input nodes
-        loc = self.n_conv(x).squeeze_(
-            -1)  # The location (loc) keyword specifies the mean. The scale (scale) keyword specifies the standard deviation.
-        scale = self.p_conv(x).squeeze_(-1)
-
-        # Reshape
-        loc = loc.view([B, self.out_dim, N])
-        scale = scale.view([B, self.out_dim, N])
-
-        # Ensure n is positive and p between 0 and 1
-        loc = F.softplus(loc)  # Some parameters can be tuned here, count data are always positive
-        scale = F.sigmoid(scale)
-        return loc.permute([0, 2, 1]), scale.permute([0, 2, 1])
-
-
-# Define the NB class first, not mixture version
-class NBNorm_ZeroInflated(nn.Module):
-    def __init__(self, c_in, c_out):
-        super(NBNorm_ZeroInflated, self).__init__()
-        self.c_in = c_in
-        self.c_out = c_out
-        self.n_conv = nn.Conv2d(in_channels=c_in,
-                                out_channels=c_out,
-                                kernel_size=(1, 1),
-                                bias=True)
-
-        self.p_conv = nn.Conv2d(in_channels=c_in,
-                                out_channels=c_out,
-                                kernel_size=(1, 1),
-                                bias=True)
-
-        self.pi_conv = nn.Conv2d(in_channels=c_in,
-                                 out_channels=c_out,
-                                 kernel_size=(1, 1),
-                                 bias=True)
-
-        self.out_dim = c_out  # output horizon
-
-    def forward(self, x):
-        print('start')
-        x = x.permute(0, 2, 1, 3)
-        print('permute')
-        (B, _, N, _) = x.shape  # B: batch_size; N: input nodes
-        print('start conv')
-        n = self.n_conv(x).squeeze_(-1)
-        print('n ok')
-        p = self.p_conv(x).squeeze_(-1)
-        print('p ok')
-        pi = self.pi_conv(x).squeeze_(-1)
-        print('pi ok')
-
-        # Reshape
-        n = n.view([B, self.out_dim, N])
-        p = p.view([B, self.out_dim, N])
-        pi = pi.view([B, self.out_dim, N])
-        print('views okk')
-        # Ensure n is positive and p between 0 and 1
-        n = F.softplus(n)  # Some parameters can be tuned here
-        p = F.sigmoid(p)
-        pi = F.sigmoid(pi)
-        return n.permute([0, 2, 1]), p.permute([0, 2, 1]), pi.permute([0, 2, 1])
-
-
-class D_GCN(nn.Module):
-    """
-    Neural network block that applies a diffusion graph convolution to sampled location
-    """
-
-    def __init__(self, in_channels, out_channels, orders, activation='relu'):
-        """
-        param in_channels: Number of time step.
-        param out_channels: Desired number of output features at each node in
-        each time step.
-        param orders: The diffusion steps.
-        """
-        super(D_GCN, self).__init__()
-        self.orders = orders
-        self.activation = activation
-        self.num_matrices = 2 * self.orders + 1
-        self.Theta1 = nn.Parameter(torch.FloatTensor(in_channels * self.num_matrices,
-                                                     out_channels))
-        self.bias = nn.Parameter(torch.FloatTensor(out_channels))
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        stdv = 1. / math.sqrt(self.Theta1.shape[1])
-        self.Theta1.data.uniform_(-stdv, stdv)
-        stdv1 = 1. / math.sqrt(self.bias.shape[0])
-        self.bias.data.uniform_(-stdv1, stdv1)
-
-    def _concat(self, x, x_):
-        x_ = x_.unsqueeze(0)
-        return torch.cat([x, x_], dim=0)
-
-    def forward(self, X, A_q, A_h):
-        """
-        :param X: Input data of shape (batch_size, num_nodes, num_timesteps)
-        :A_q: The forward random walk matrix (num_nodes, num_nodes)
-        :A_h: The backward random walk matrix (num_nodes, num_nodes)
-        :return: Output data of shape (batch_size, num_nodes, num_features)
-        """
-        batch_size = X.shape[0]  # batch_size
-        num_node = X.shape[1]
-        input_size = X.size(2)  # time_length
-        supports = []
-        supports.append(A_q)
-        supports.append(A_h)
-
-        x0 = X.permute(1, 2, 0)  # (num_nodes, num_times, batch_size)
-        x0 = torch.reshape(x0, shape=[num_node, input_size * batch_size])
-        x = torch.unsqueeze(x0, 0)
-        for support in supports:
-            x1 = torch.mm(support, x0)
-            x = self._concat(x, x1)
-            for k in range(2, self.orders + 1):
-                x2 = 2 * torch.mm(support, x1) - x0
-                x = self._concat(x, x2)
-                x1, x0 = x2, x1
-
-        x = torch.reshape(x, shape=[self.num_matrices, num_node, input_size, batch_size])
-        x = x.permute(3, 1, 2, 0)  # (batch_size, num_nodes, input_size, order)
-        x = torch.reshape(x, shape=[batch_size, num_node, input_size * self.num_matrices])
-        x = torch.matmul(x, self.Theta1)  # (batch_size * self._num_nodes, output_size)     
-        x += self.bias
-        if self.activation == 'relu':
-            x = F.relu(x)
-        elif self.activation == 'selu':
-            x = F.selu(x)
-
+    def forward(self, input):
+        x = torch.unsqueeze(torch.unsqueeze(input, 0), 0)
+        x = self.start_conv(x)
+        for i in range(self.blocks * self.layers):
+            residual = x
+            # dilated convolution
+            filter = self.filter_convs[i](residual)
+            filter = torch.tanh(filter)
+            gate = self.gate_convs[i](residual)
+            gate = torch.sigmoid(gate)
+            x = filter * gate
+        x = torch.squeeze(x, 1)
+        x = torch.permute(x, (0, 2, 1))
+        x = torch.squeeze(x)
+        x = torch.nan_to_num(x)
         return x
 
 
-## Code of BTCN from Yuankai
-class B_TCN(nn.Module):
-    """
-    Neural network block that applies a bidirectional temporal convolution to each node of
-    a graph.
-    """
+class GAT(nn.Module):
+    def __init__(self, in_features=200, out_features=200, dropout=0.3):
+        super(GAT, self).__init__()
+        self.dropout = dropout
+        self.in_features = in_features
+        self.out_features = out_features
+        self.W = nn.Parameter(torch.empty(size=(in_features, out_features)).to(device))
+        nn.init.xavier_uniform_(self.W.data, gain=1.414)
+        self.a = nn.Parameter(torch.empty(size=(2 * out_features, 1)).to(device))
+        nn.init.xavier_uniform_(self.a.data, gain=1.414)
+        self.leakyrelu = nn.LeakyReLU(0.2)
 
-    def __init__(self, in_channels, out_channels, kernel_size=3, activation='relu', device='cpu'):
-        """
-        :param in_channels: Number of nodes in the graph.
-        :param out_channels: Desired number of output features.
-        :param kernel_size: Size of the 1D temporal kernel.
-        """
-        super(B_TCN, self).__init__()
-        # forward dirction temporal convolution
-        self.kernel_size = kernel_size
-        self.out_channels = out_channels
-        self.activation = activation
-        self.device = device
-        self.conv1 = nn.Conv2d(in_channels, out_channels, (1, kernel_size))
-        self.conv2 = nn.Conv2d(in_channels, out_channels, (1, kernel_size))
-        self.conv3 = nn.Conv2d(in_channels, out_channels, (1, kernel_size))
+    def forward(self, h, adj):
+        # adj is the adjacency matrix
+        Wh = torch.matmul(h, self.W)
+        e = self._prepare_attentional_mechanism_input(Wh)
+        zero_vec = -9e15 * torch.ones_like(e)
+        # attention = torch.where(adj > 0, e, zero_vec)
+        attention = adj
+        attention = F.softmax(attention, dim=1)
+        attention = F.dropout(attention, self.dropout, training=self.training)
+        h_prime = torch.matmul(attention.float(), Wh)
+        return torch.nan_to_num(F.elu(h_prime))
 
-        self.conv1b = nn.Conv2d(in_channels, out_channels, (1, kernel_size))
-        self.conv2b = nn.Conv2d(in_channels, out_channels, (1, kernel_size))
-        self.conv3b = nn.Conv2d(in_channels, out_channels, (1, kernel_size))
+    def _prepare_attentional_mechanism_input(self, Wh):
+        Wh1 = torch.matmul(Wh, self.a[:self.out_features, :])
+        Wh2 = torch.matmul(Wh, self.a[self.out_features:, :])
 
-    def forward(self, X):
-        """
-        :param X: Input data of shape (batch_size, num_timesteps, num_nodes)
-        :return: Output data of shape (batch_size, num_timesteps, num_features)
-        """
-        batch_size = X.shape[0]
-        seq_len = X.shape[1]
-        Xf = X.unsqueeze(1)  # (batch_size, 1, num_timesteps, num_nodes)
-
-        inv_idx = torch.arange(Xf.size(2) - 1, -1, -1).long().to(device=self.device)  # .to(device=self.device).to(device=self.device)
-        Xb = Xf.index_select(2, inv_idx)  # inverse the direction of time
-
-        Xf = Xf.permute(0, 3, 1, 2)
-        Xb = Xb.permute(0, 3, 1, 2)  # (batch_size, num_nodes, 1, num_timesteps)
-        tempf = self.conv1(Xf) * torch.sigmoid(self.conv2(Xf))  # +
-        outf = tempf + self.conv3(Xf)
-        outf = outf.reshape([batch_size, seq_len - self.kernel_size + 1, self.out_channels])
-
-        tempb = self.conv1b(Xb) * torch.sigmoid(self.conv2b(Xb))  # +
-        outb = tempb + self.conv3b(Xb)
-        outb = outb.reshape([batch_size, seq_len - self.kernel_size + 1, self.out_channels])
-
-        rec = torch.zeros([batch_size, self.kernel_size - 1, self.out_channels]).to(
-            device=self.device)  # .to(device=self.device)
-        outf = torch.cat((outf, rec), dim=1)
-        outb = torch.cat((outb, rec), dim=1)  # (batch_size, num_timesteps, out_features)
-
-        inv_idx = torch.arange(outb.size(1) - 1, -1, -1).long().to(device=self.device)  # .to(device=self.device)
-        outb = outb.index_select(1, inv_idx)
-        out = outf + outb
-        if self.activation == 'relu':
-            out = F.relu(outf) + F.relu(outb)
-        elif self.activation == 'sigmoid':
-            out = F.sigmoid(outf) + F.sigmoid(outb)
-        return out
+        # broadcast add
+        e = Wh1 + Wh2.T
+        return self.leakyrelu(e)
 
 
-class ST_NB(nn.Module):
-    """
-  wx_t  + wx_s
-    |       |
-   TC4     SC4
-    |       |
-   TC3     SC3
-    |       |
-   z_t     z_s
-    |       |
-   TC2     SC2
-    |       |  
-   TC1     SC1
-    |       |
-   x_m     x_m
-    """
+class FilterLinear(nn.Module):
+    def __init__(self, in_features, out_features, filter_square_matrix, bias=True):
+        '''
+        filter_square_matrix : filter square matrix, whose each elements is 0 or 1.
+        '''
+        super(FilterLinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
 
-    def __init__(self, SC1, SC2, SC3, TC1, TC2, TC3, SNB, TNB):
-        super(ST_NB, self).__init__()
-        self.TC1 = TC1
-        self.TC2 = TC2
-        self.TC3 = TC3
-        self.TNB = TNB
+        use_gpu = torch.cuda.is_available()
+        self.filter_square_matrix = None
+        if use_gpu:
+            self.filter_square_matrix = Variable(filter_square_matrix.cuda(), requires_grad=False)
+        else:
+            self.filter_square_matrix = Variable(filter_square_matrix, requires_grad=False)
 
-        self.SC1 = SC1
-        self.SC2 = SC2
-        self.SC3 = SC3
-        self.SNB = SNB
+        self.weight = Parameter(torch.Tensor(out_features, in_features))
+        if bias:
+            self.bias = Parameter(torch.Tensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
 
-    def forward(self, X, A_q, A_h):
-        """
-        :param X: Input data of shape (batch_size, num_timesteps, num_nodes)
-        :A_hat: The Laplacian matrix (num_nodes, num_nodes)
-        :return: Reconstructed X of shape (batch_size, num_timesteps, num_nodes)
-        """
-        X = X[:, :, :, 0]  # Dummy dimension deleted
-        X_T = X.permute(0, 2, 1)
-        X_t1 = self.TC1(X_T)
-        X_t2 = self.TC2(X_t1)  # num_time, rank
-        self.temporal_factors = X_t2
-        X_t3 = self.TC3(X_t2)
-        _b, _h, _ht = X_t3.shape
-        n_t_nb, p_t_nb = self.TNB(X_t3.view(_b, _h, _ht, 1))
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.weight.size(1))
+        self.weight.data.uniform_(-stdv, stdv)
+        if self.bias is not None:
+            self.bias.data.uniform_(-stdv, stdv)
 
-        X_s1 = self.SC1(X, A_q, A_h)
-        X_s2 = self.SC2(X_s1, A_q, A_h)  # num_nodes, rank
-        self.space_factors = X_s2
-        X_s3 = self.SC3(X_s2, A_q, A_h)
-        _b, _n, _hs = X_s3.shape
-        n_s_nb, p_s_nb = self.SNB(X_s3.view(_b, _n, _hs, 1))
-        n_res = n_t_nb.permute(0, 2, 1) * n_s_nb
-        p_res = p_t_nb.permute(0, 2, 1) * p_s_nb
+    #         print(self.weight.data)
+    #         print(self.bias.data)
 
-        return n_res, p_res
+    def forward(self, input):
+        return F.linear(input, self.filter_square_matrix.matmul(self.weight.double()), self.bias)
+
+    def __repr__(self):
+        return self.__class__.__name__ + '(' \
+            + 'in_features=' + str(self.in_features) \
+            + ', out_features=' + str(self.out_features) \
+            + ', bias=' + str(self.bias is not None) + ')'
 
 
-class ST_Gau(nn.Module):
-    """
-  wx_t  + wx_s
-    |       |
-   TC4     SC4
-    |       |
-   TC3     SC3
-    |       |
-   z_t     z_s
-    |       |
-   TC2     SC2
-    |       |  
-   TC1     SC1
-    |       |
-   x_m     x_m
-    """
+class GCN(nn.Module):
+    def __init__(self, A, feature_size):
+        super(GCN, self).__init__()
+        self.feature_size = feature_size
+        self.A = A
+        self.linear = FilterLinear(410, 410, self.A, bias=False)
 
-    def __init__(self, SC1, SC2, SC3, TC1, TC2, TC3, SGau, TGau):
-        super(ST_Gau, self).__init__()
-        self.TC1 = TC1
-        self.TC2 = TC2
-        self.TC3 = TC3
-        self.TGau = TGau
-
-        self.SC1 = SC1
-        self.SC2 = SC2
-        self.SC3 = SC3
-        self.SGau = SGau
-
-    def forward(self, X, A_q, A_h):
-        """
-        :param X: Input data of shape (batch_size, num_timesteps, num_nodes)
-        :A_hat: The Laplacian matrix (num_nodes, num_nodes)
-        :return: Reconstructed X of shape (batch_size, num_timesteps, num_nodes)
-        """
-        X = X[:, :, :, 0]  # .to(device='cuda') # Dummy dimension deleted
-        X_T = X.permute(0, 2, 1)
-        X_t1 = self.TC1(X_T)
-        X_t2 = self.TC2(X_t1)  # num_time, rank
-        self.temporal_factors = X_t2
-        X_t3 = self.TC3(X_t2)
-        _b, _h, _ht = X_t3.shape
-        loc_t, scale_t = self.TGau(X_t3.view(_b, _h, _ht, 1))
-
-        X_s1 = self.SC1(X, A_q, A_h)
-        X_s2 = self.SC2(X_s1, A_q, A_h)  # num_nodes, rank
-        self.space_factors = X_s2
-        X_s3 = self.SC3(X_s2, A_q, A_h)
-        _b, _n, _hs = X_s3.shape
-        loc_s, scale_s = self.SGau(X_s3.view(_b, _n, _hs, 1))
-
-        loc_res = loc_t.permute(0, 2, 1) * loc_s
-        scale_res = scale_t.permute(0, 2, 1) * scale_s
-
-        return loc_res, scale_res
+    def forward(self, input, BNP):
+        # some squeeze and unsqueeze
+        x = torch.einsum('ij,xyij -> xyij', self.A, torch.Tensor(BNP).double())
+        x = self.linear(x)
+        x = x.reshape(-1, 410, 410)
+        x = torch.einsum('ij,ijk->ik', input.double().transpose(0, 1), x.double())
+        return torch.nan_to_num(x.transpose(0, 1))
 
 
-class ST_NB_ZeroInflated(nn.Module):
-    """
-  wx_t  + wx_s
-    |       |
-   TC4     SC4
-    |       |
-   TC3     SC3
-    |       |
-   z_t     z_s
-    |       |
-   TC2     SC2
-    |       |  
-   TC1     SC1
-    |       |
-   x_m     x_m
-    """
+class TSM_first(nn.Module):
+    def __init__(self, A, in_features=200, out_features=200):
+        super(TSM_first, self).__init__()
+        self.GDCN1 = GDCN()
+        self.GDCN2 = GDCN()
+        self.gat = GAT(in_features=in_features, out_features=out_features)
+        self.A = A
+        self.GCN1 = GCN(A, in_features)
+        self.GCN2 = GCN(A, in_features)
+        self.BN1 = nn.BatchNorm1d(in_features)
+        self.BN2 = nn.BatchNorm1d(in_features)
 
-    def __init__(self, SC1, SC2, SC3, TC1, TC2, TC3, SNB, TNB):
-        super(ST_NB_ZeroInflated, self).__init__()
-        self.TC1 = TC1
-        self.TC2 = TC2
-        self.TC3 = TC3
-        self.TNB = TNB
+        self.nodevec1 = nn.Parameter(torch.randn(int(A.shape[0]), 10).to(device), requires_grad=True).to(device)
+        self.nodevec2 = nn.Parameter(torch.randn(10, int(A.shape[0])).to(device), requires_grad=True).to(device)
 
-        self.SC1 = SC1
-        self.SC2 = SC2
-        self.SC3 = SC3
-        self.SNB = SNB
+        self.nodevec3 = nn.Parameter(torch.randn(int(A.shape[0]), 10).to(device), requires_grad=True).to(device)
+        self.nodevec4 = nn.Parameter(torch.randn(10, int(A.shape[0])).to(device), requires_grad=True).to(device)
 
-    def forward(self, X, A_q, A_h):
-        """
-        :param X: Input data of shape (batch_size, num_timesteps, num_nodes)
-        :A_hat: The Laplacian matrix (num_nodes, num_nodes)
-        :return: Reconstructed X of shape (batch_size, num_timesteps, num_nodes)
-        """
-        X = X[:, :, :, 0].to('mps')  # .to(device='cuda') # Dummy dimension deleted
-        X_T = X.permute(0, 2, 1)
-        print('start TC1')
-        X_t1 = self.TC1(X_T)
-        print('start TC2')
-        X_t2 = self.TC2(X_t1)  # num_time, rank
-        self.temporal_factors = X_t2
-        print('start TC3')
-        X_t3 = self.TC3(X_t2)
-        _b, _h, _ht = X_t3.shape
-        print('start TNB')
-        n_t_nb, p_t_nb, pi_t_nb = self.TNB(X_t3.view(_b, _h, _ht, 1))
-        print('start SC1')
-        X_s1 = self.SC1(X, A_q, A_h)
-        print('Start SC2')
-        X_s2 = self.SC2(X_s1, A_q, A_h)  # num_nodes, rank
-        self.space_factors = X_s2
-        print('start SC3')
-        X_s3 = self.SC3(X_s2, A_q, A_h)
-        _b, _n, _hs = X_s3.shape
-        print('start SNB')
-        n_s_nb, p_s_nb, pi_s_nb = self.SNB(X_s3.view(_b, _n, _hs, 1))
-        n_res = n_t_nb.permute(0, 2, 1) * n_s_nb
-        p_res = p_t_nb.permute(0, 2, 1) * p_s_nb
-        pi_res = pi_t_nb.permute(0, 2, 1) * pi_s_nb
-        print('end of class')
+    def forward(self, input, BNP):
+        BNP = torch.squeeze(BNP)
+        x = input.reshape((input.shape[0] * input.shape[1]), input.shape[2])
+        x1 = self.GDCN1(x)
+        x_middle = self.gat(x1, self.A)
+        x_middle = self.GCN1(x_middle, BNP)
+        x = self.BN1(x.permute(1, 0) + x_middle.float()).permute(1, 0)
 
-        return n_res, p_res, pi_res
+        x2 = self.GDCN2(x)
+        x_middle = self.gat(x2, self.A)
+        x_middle = self.GCN2(x_middle, BNP)
+        x = self.BN2(x.permute(1, 0) + x_middle.float()).permute(1, 0)
+
+        return x, x1, x2
+
+
+class TSM_others(nn.Module):
+    def __init__(self, A, in_features=200, out_features=200):
+        super(TSM_others, self).__init__()
+        self.GDCN1 = GDCN()
+        self.GDCN2 = GDCN()
+        self.gat = GAT(in_features=in_features, out_features=out_features)
+        self.A = A
+        self.GCN1 = GCN(A, in_features)
+        self.GCN2 = GCN(A, in_features)
+        self.BN1 = nn.BatchNorm1d(in_features)
+        self.BN2 = nn.BatchNorm1d(in_features)
+
+        self.nodevec1 = nn.Parameter(torch.randn(int(A.shape[0]), 10).to(device), requires_grad=True).to(device)
+        self.nodevec2 = nn.Parameter(torch.randn(10, int(A.shape[0])).to(device), requires_grad=True).to(device)
+
+        self.nodevec3 = nn.Parameter(torch.randn(int(A.shape[0]), 10).to(device), requires_grad=True).to(device)
+        self.nodevec4 = nn.Parameter(torch.randn(10, int(A.shape[0])).to(device), requires_grad=True).to(device)
+
+    def forward(self, x, BNP):
+        BNP = torch.squeeze(BNP)
+        x1 = self.GDCN1(x)
+        x_middle = self.gat(x1, self.A)
+        x_middle = self.GCN1(x_middle, BNP)
+        x = self.BN1(x.permute(1, 0) + x_middle.float()).permute(1, 0)
+
+        x2 = self.GDCN2(x)
+        x_middle = self.gat(x2, self.A)
+        x_middle = self.GCN2(x_middle, BNP)
+        x = self.BN2(x.permute(1, 0) + x_middle.float()).permute(1, 0)
+
+        return x, x1, x2
+
+
+class linear(nn.Module):
+    def __init__(self, c_in, c_out):
+        super(linear, self).__init__()
+        self.mlp = torch.nn.Conv2d(c_in, c_out, kernel_size=(1, 1), padding=(0, 0), stride=(1, 1), bias=True)
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class COMPONENT(nn.Module):
+    def __init__(self, A, inp=200, out=200):
+        super(COMPONENT, self).__init__()
+        self.A = A
+        self.TSM1 = TSM_first(A=torch.tensor(self.A), in_features=inp, out_features=out)
+        self.TSM2 = TSM_others(A=torch.tensor(self.A), in_features=inp, out_features=out)
+        self.TSM3 = TSM_others(A=torch.tensor(self.A), in_features=inp, out_features=out)
+        self.TSM4 = TSM_others(A=torch.tensor(self.A), in_features=inp, out_features=out)
+        self.RL = nn.ReLU()
+        self.conv1 = linear(1, 1)
+        self.conv2 = linear(1, 1)
+        self.linear = nn.Linear(inp, out_features=20)
+
+    def forward(self, x, BNP):
+        x, x11, x12 = self.TSM1(x, BNP)
+        x, x21, x22 = self.TSM2(x, BNP)
+        x, x31, x32 = self.TSM3(x, BNP)
+        x, x41, x42 = self.TSM4(x, BNP)
+
+        x = self.RL(x11 + x12 + x21 + x22 + x31 + x32 + x41 + x42)
+        x = torch.unsqueeze(torch.unsqueeze(x, 0), 0)
+        x = self.conv1(x)
+        x = self.RL(x)
+        x = self.conv2(x)
+        x = self.RL(x)
+        x = torch.squeeze(x)
+        x = self.linear(x)
+        return x.permute(1, 0)
+
+
+class Multi_STGAC(nn.Module):
+    def __init__(self, A):
+        super(Multi_STGAC, self).__init__()
+        self.A = A
+        self.Recent_component = COMPONENT(A, 20 * 10, 20 * 10)  # 20 is the batch size and 10 is the sequence length
+        self.Daily_component = COMPONENT(A, 20 * 4, 20 * 4)
+        self.Weekly_component = COMPONENT(A, 20 * 2, 20 * 2)
+        self.conv1 = nn.Conv2d(in_channels=3 * 410, out_channels=410, kernel_size=1, padding='same')
+        self.conv2 = nn.Conv2d(in_channels=410, out_channels=410, kernel_size=(1, 1), padding='same')
+        self.elu = nn.ELU()
+
+    def forward(self, Xr, Xd, Xw, BNPr, BNPd, BNPw):
+        X1 = self.Recent_component(Xr, BNPr)
+        X2 = self.Daily_component(Xd, BNPd)
+        X3 = self.Weekly_component(Xw, BNPw)
+        # Concatenation operation
+        Y = torch.cat((X1, X2, X3), 1)
+        Y = torch.unsqueeze(torch.unsqueeze(Y, 2), 3)
+        Y = self.conv1(Y)
+        Y = self.elu(Y)
+        Y = self.conv2(Y)
+        Y = torch.squeeze(Y)
+        return Y
+
+
+class ZINB(nn.Module):
+    def __init__(self, n_input, n_hidden, p_dropout):
+        super(ZINB, self).__init__()
+        self.dense1 = nn.Linear(n_input, n_hidden)
+        self.dense2 = nn.Linear(n_hidden, n_hidden)
+        self.dropout = nn.Dropout(p_dropout)
+        self.dense_n = nn.Linear(n_hidden, 1)
+        self.dense_p = nn.Linear(n_hidden, 1)
+        self.dense_pi = nn.Linear(n_hidden, 1)
+
+    def forward(self, x):
+        x = F.relu(self.dense1(x))
+        x = self.dropout(x)
+        x = F.relu(self.dense2(x))
+        x = self.dropout(x)
+        n = torch.exp(self.dense_n(x))
+        p = torch.sigmoid(self.dense_p(x))
+        pi = torch.sigmoid(self.dense_pi(x))
+        return n, p, pi
+
+    def zinb_loss(self, x, n, p, pi, eps=1e-8):
+        nb = torch.distributions.negative_binomial.NegativeBinomial(total_count=n, probs=p + eps)
+        x = torch.clamp(torch.round(x), min=0)
+        log_prob = nb.log_prob(x)
+        log_l = torch.log(pi + (1 - pi) * torch.exp(log_prob))
+        log_1ml = torch.log(1 - pi + pi * torch.exp(log_prob))
+        loss = -torch.mean(log_l + log_1ml)
+        return loss
+
+
+class ZINB_GNN(nn.Module):
+    def __init__(self, gnn_model, zinb_model, n_input, n_hidden, p_dropout):
+        super(ZINB_GNN, self).__init__()
+        self.gnn_model = gnn_model
+        self.zinb_model = zinb_model(n_input, n_hidden, p_dropout)
+
+    def forward(self, x1, x2, x3, bnp1, bnp2, bnp3):
+        x = self.gnn_model(x1, x2, x3, bnp1, bnp2, bnp3)
+        n, p, pi = self.zinb_model(x)
+        return n, p, pi
+
+    def zinb_loss(self, x, n, p, pi):
+        return self.zinb_model.zinb_loss(x, n, p, pi)
